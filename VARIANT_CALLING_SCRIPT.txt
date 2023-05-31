@@ -58,6 +58,28 @@ mv sorted.bam sorted.bam.bai marked_duplicates.bam marked_dup_metrics.txt recali
 # Cleanup intermediate files
 rm aligned.sam aligned.bam aligned.bam.bai
 
-echo "Variant calling pipeline completed successfully!"
 
-Make sure you have the necessary tools installed (e.g., BWA, Samtools, GATK) and adjust the script accordingly based on the specific options and paths you need to use. You can save this script to a file (e.g., variant_calling_pipeline.sh), make it executable (chmod +x variant_calling_pipeline.sh), and run it by executing ./variant_calling_pipeline.sh in the terminal.
+# Manuplation of vcf file using bcf tools:
+
+#!/bin/bash
+
+# View the contents of a VCF file
+bcftools view input.vcf
+
+# Filter variants based on a minimum quality score of 30
+bcftools filter -i 'QUAL > 30' input.vcf > filtered.vcf
+
+# Merge multiple VCF files
+bcftools merge input1.vcf input2.vcf > merged.vcf
+
+# Subset specific samples from a VCF file
+bcftools view -s sample1,sample2 input.vcf > subset.vcf
+
+# Convert VCF to BCF format
+bcftools convert input.vcf -o output.bcf
+
+# Convert VCF to plaintext format
+bcftools convert input.vcf -o output.txt
+
+# Calculate basic statistics for a VCF file
+bcftools stats input.vcf > stats.txt
