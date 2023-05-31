@@ -1,0 +1,242 @@
+#!/bin/bash
+
+# Specify input and output files/directories
+input_directory="input"
+output_directory="output"
+reference_genome="reference.fasta"
+annotation_file="annotation.gtf"
+
+# Step 1: Quality control with FastQC
+mkdir -p $output_directory/fastqc
+fastqc -o $output_directory/fastqc $input_directory/*.fastq
+
+# Step 2: Alignment with HISAT2
+mkdir -p $output_directory/alignment
+hisat2-build $reference_genome $output_directory/alignment/reference_index
+
+for file in $input_directory/*.fastq; do
+    sample_name=$(basename "$file" .fastq)
+    hisat2 -p 4 --dta-cufflinks -x $output_directory/alignment/reference_index -U $file -S $output_directory/alignment/$sample_name.sam
+done
+
+# Step 3: Assembly and quantification with StringTie
+mkdir -p $output_directory/quantification
+for file in $output_directory/alignment/*.sam; do
+    sample_name=$(basename "$file" .sam)
+    stringtie $file -p 4 -G $annotation_file -o $output_directory/quantification/$sample_name.gtf -l $sample_name
+done
+
+# Step 4: Merge transcript assemblies
+stringtie --merge -p 4 -G $annotation_file -o $output_directory/quantification/merged.gtf $output_directory/quantification/*.gtf
+
+# Step 5: Estimate transcript abundances
+for file in $output_directory/alignment/*.sam; do
+    sample_name=$(basename "$file" .sam)
+    stringtie -e -B -p 4 -G $output_directory/quantification/merged.gtf -o $output_directory/quantification/$sample_name.gtf $file
+done
+
+# Step 6: Run differential expression analysis with DESeq2
+Rscript <<EOF
+library(DESeq2)
+
+# Read count matrix
+count_data <- as.matrix(read.table("$output_directory/quantification/count_matrix.txt", header=TRUE, row.names=1))
+
+# Sample information
+sample_info <- read.table("$output_directory/quantification/sample_info.txt", header=TRUE, row.names=1)
+
+# Create DESeq2 object
+dds <- DESeqDataSetFromMatrix(countData=count_data, colData=sample_info, design=~condition)
+dds <- DESeq(dds)
+
+# Differential expression analysis
+res <- results(dds)
+res <- res[order(res$padj), ]
+write.table(res, file="$output_directory/quantification/differential_expression_results.txt", sep="\t", quote=FALSE)
+EOF
+
+echo "RNA-seq pipeline completed successfully!"
+
+
+
+#!/bin/bash
+
+# RNA-seq pipeline script
+
+# Set the necessary software paths
+FASTQ_DIR=/path/to/fastq/files
+GENOME_INDEX=/path/to/genome/index
+GTF_FILE=/path/to/annotation.gtf
+OUTPUT_DIR=/path/to/output
+
+# Step 1: Quality control with FastQC
+fastqc -o $OUTPUT_DIR $FASTQ_DIR/*.fastq
+
+# Step 2: Adapter and quality trimming with Trim Galore
+for file in $FASTQ_DIR/*.fastq; do
+    trim_galore --quality 20 --illumina --output_dir $OUTPUT_DIR $file
+done
+
+# Step 3: Alignment with HISAT2
+for file in $OUTPUT_DIR/*trimmed.fq; do
+    base=$(basename $file "_trimmed.fq")
+    hisat2 -x $GENOME_INDEX -U $file -S $OUTPUT_DIR/$base.sam
+done
+
+# Step 4: Convert SAM to BAM and sort with Samtools
+for file in $OUTPUT_DIR/*.sam; do
+    base=$(basename $file ".sam")
+    samtools view -S -b $file > $OUTPUT_DIR/$base.bam
+    samtools sort -o $OUTPUT_DIR/$base.sorted.bam $OUTPUT_DIR/$base.bam
+done
+
+# Step 5: Index the sorted BAM files with Samtools
+for file in $OUTPUT_DIR/*.sorted.bam; do
+    samtools index $file
+done
+
+# Step 6: Quantify gene expression with featureCounts
+featureCounts -T 4 -a $GTF_FILE -o $OUTPUT_DIR/counts.txt $OUTPUT_DIR/*.sorted.bam
+
+# Step 7: Perform differential expression analysis with DESeq2 or other tools
+Rscript differential_expression_analysis.R --input $OUTPUT_DIR/counts.txt --output $OUTPUT_DIR/differential_expression_results.txt
+
+
+
+
+import pandas as pd
+import numpy as np
+from scipy import stats
+from statsmodels.stats.multitest import multipletests
+import matplotlib.pyplot as plt
+import seaborn as sns
+import statsmodels.api as sm
+from statsmodels.formula.api import ols
+from sklearn.decomposition import PCA
+from sklearn.preprocessing import StandardScaler
+import rpy2.robjects as robjects
+from rpy2.robjects import pandas2ri
+pandas2ri.activate()
+from rpy2.robjects.packages import importr
+deseq = importr('DESeq2')
+
+# Step 1: Data Preparation
+# Read count data into a pandas DataFrame
+count_data = pd.read_csv('counts.txt', sep='\t', index_col=0)
+
+# Create metadata table with conditions for each sample
+metadata = pd.DataFrame({
+    'Sample': count_data.columns,
+    'Condition': ['tumor', 'tumor', 'normal', 'normal'] # Adjust according to your sample conditions
+})
+
+# Step 2: Normalization and Preprocessing
+# Normalize the count data using DESeq2's variance stabilizing transformation (VST)
+r_count_data = pandas2ri.py2ri(count_data)
+dds = deseq.DESeqDataSetFromMatrix(countData=r_count_data, colData=metadata, design=~Condition)
+dds = deseq.DESeq(dds)
+vst = deseq.vst(dds)
+vst_data = pandas2ri.ri2py(vst)
+
+# Step 3: Statistical Testing
+# Perform statistical test (e.g., t-test) to identify differentially expressed genes
+design_matrix = deseq.modelMatrix(dds)
+contrast_matrix = np.array([1, -1]).reshape(2,1)
+contrasts = deseq.makeContrasts(condition_diff=contrast_matrix, levels=design_matrix)
+contrast_fit = deseq.estimateContrast(dds, contrasts)
+contrast_results = deseq.results(contrast_fit)
+contrast_results = pandas2ri.ri2py(contrast_results)
+
+# Step 4: Multiple Testing Correction
+p_values = contrast_results['pvalue']
+adjusted_p_values = multipletests(p_values, method='fdr_bh')[1]
+contrast_results['adjusted_pvalue'] = adjusted_p_values
+
+# Step 5: Interpretation and Visualization
+# Volcano Plot
+plt.scatter(contrast_results['log2FoldChange'], -np.log10(contrast_results['adjusted_pvalue']), alpha=0.5)
+plt.xlabel('log2 Fold Change')
+plt.ylabel('-log10(Adjusted p-value)')
+plt.title('Volcano Plot')
+plt.show()
+
+# Heatmap
+sns.clustermap(vst_data, cmap='viridis')
+
+# Gene Set Enrichment Analysis
+gene_ids = count_data.index
+de_genes = contrast_results.loc[contrast_results['adjusted_pvalue'] < 0.05, 'baseMean'].index.tolist()
+de_genes = np.intersect1d(de_genes, gene_ids) # Ensure genes are present in original count data
+
+# Perform gene set enrichment analysis using libraries like clusterProfiler or fgsea
+
+# Principal Component Analysis (PCA)
+scaler = StandardScaler()
+scaled_data = scaler.fit_transform(vst_data.T)
+pca = PCA(n_components=2)
+pca_data = pca.fit_transform(scaled_data)
+pca_df = pd.DataFrame(data=pca_data, columns=['PC1', 'PC2'])
+pca_df['Condition'] = metadata['Condition']
+sns.scatterplot(data=pca_df, x='PC1', y='PC2', hue='Condition')
+
+# Step 6: Additional Analyses
+# Additional downstream analysis such as pathway analysis, gene network analysis, etc.
+
+
+VOLCANO PLOT 
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Read the differential expression results file
+df = pd.read_csv("differential_expression_results.txt", sep="\t")
+
+# Calculate the negative logarithm of p-values
+df['log10p'] = -1 * df['p-value'].apply(lambda x: math.log10(x))
+
+# Set the significance threshold
+significance_threshold = 0.05
+
+# Create a boolean mask to identify significantly differentially expressed genes
+sig_genes = df['p-value'] < significance_threshold
+
+# Generate the volcano plot
+plt.scatter(df.loc[~sig_genes, 'log2FoldChange'], df.loc[~sig_genes, 'log10p'], color='black', s=10, alpha=0.5)
+plt.scatter(df.loc[sig_genes, 'log2FoldChange'], df.loc[sig_genes, 'log10p'], color='red', s=10, alpha=0.5)
+plt.axhline(-math.log10(significance_threshold), color='gray', linestyle='--')
+plt.axhline(math.log10(significance_threshold), color='gray', linestyle='--')
+plt.xlabel('log2 Fold Change')
+plt.ylabel('-log10 p-value')
+plt.title('Volcano Plot')
+plt.show()
+
+HEATMAP 
+
+import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+# Load your data into a pandas DataFrame
+data = pd.read_csv('heatmap_data.csv')
+
+# Set the row and column labels (if applicable)
+row_labels = data['Gene']
+column_labels = data.columns[1:]  # Assuming the first column contains gene names
+
+# Remove the labels from the data for visualization purposes
+data = data.iloc[:, 1:]
+
+# Create the heatmap using seaborn
+plt.figure(figsize=(10, 8))  # Adjust the figure size as needed
+sns.heatmap(data, cmap='viridis', annot=True, fmt='.2f', xticklabels=column_labels, yticklabels=row_labels)
+
+# Set the axis labels and title
+plt.xlabel('Conditions')
+plt.ylabel('Genes')
+plt.title('Heatmap')
+
+# Rotate the x-axis labels for better readability (optional)
+plt.xticks(rotation=45)
+
+# Show the plot
+plt.show()
+
